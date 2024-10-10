@@ -103,6 +103,8 @@ for curso in cursos_data:
 
 uea_selected = int(input("\nSeleccione UEA a extraer > "))
 if isinstance(uea_selected, int) and uea_selected < len(cursos_data):
+
+    
     # Mercado y competencia entre capitales
     print(f"> [Accediendo a grupos para {cursos_data[uea_selected]['name_text']}]\n")
     cursos_data[uea_selected]['link'].click()
