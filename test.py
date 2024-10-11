@@ -22,13 +22,23 @@ table = driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
 # Extrae encabezados
 headers = [header.text for header in table.find_elements(By.XPATH, ".//thead/tr/th")]
 desired_headers = ["TRIMESTRE", "GRUPO", "ACTA", "INSCRITOS", "LISTA DE GRUPO"]
+
 # Extrae datos de las filas
 data = []
 rows = table.find_elements(By.XPATH, ".//tbody/tr")
 
-
-for row in rows:
+for i in range(len(rows)):
     try:
+        # Vuelve a localizar la tabla y las filas en cada iteración
+        table = driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
+        rows = table.find_elements(By.XPATH, ".//tbody/tr")
+        
+        # Verifica si el índice `i` es válido
+        if i >= len(rows):
+            break
+
+        row = rows[i]
+
         # Localiza el <td> que quieres eliminar, si existe
         nested_tables = row.find_elements(By.XPATH, './/td/table')
         
@@ -44,15 +54,14 @@ for row in rows:
             'grupo': grupo,
             'link': {
                 'texto': boton.text,
-                'href': boton.get_attribute('href')
+                'object': boton
             }
         })
     except Exception as e:
         print(f"Error al procesar la fila: {e}")
 
 # Convierte a JSON
-json_data = json.dumps(data, ensure_ascii=False, indent=4)
-print(json_data)
+print(data)
 
 # Cierra el navegador
 driver.quit()

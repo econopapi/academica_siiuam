@@ -1,4 +1,4 @@
-import os, sys, json, requests
+import os, sys, json, requests, time
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -104,7 +104,7 @@ for curso in cursos_data:
 uea_selected = int(input("\nSeleccione UEA a extraer > "))
 if isinstance(uea_selected, int) and uea_selected < len(cursos_data):
 
-    
+
     # Mercado y competencia entre capitales
     print(f"> [Accediendo a grupos para {cursos_data[uea_selected]['name_text']}]\n")
     cursos_data[uea_selected]['link'].click()
@@ -116,53 +116,94 @@ if isinstance(uea_selected, int) and uea_selected < len(cursos_data):
         print('Error cargando Módulos')
         driver.quit()
 
-    print("> [Accediendo a grupo SR01E]\n")
-    driver.find_element(By.ID, "ufld:CD_INSCRITOS.CURSOS.AE02:AELCWBAWT012.1").click()
+    grupos_table = driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
+
+    grupos_data = []
+    grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
+
+for row in grupos_rows:
+    try:
+        # Eliminación de tablas anidadas no deseadas
+        nested_tables = row.find_elements(By.XPATH, './/td/table')
+        for nested_table in nested_tables:
+            driver.execute_script("arguments[0].remove();", nested_table)
+
+        grupo = row.find_element(By.XPATH, './/td[2]').text.strip()
+        boton = row.find_element(By.XPATH, './/td[10]/a')
+
+        # Agregar el `id` del botón en lugar del `xpath`
+        grupos_data.append({
+            'grupo': grupo,
+            'boton_id': boton.get_attribute("id")
+        })
+    except Exception as e:
+        print(f"Error al procesar la fila: {e}")
+
+
+    ###
+# print(grupos_data)
+# input(".")
+# Iterar sobre `grupos_data` para hacer clic y extraer datos
+for i in grupos_data:
+    print(f"> [Accediendo a grupo {i['grupo']}]\n")
+    
+    # Localiza el botón por `id` antes de hacer clic
+    boton = driver.find_element(By.ID, i['boton_id'])
+    WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, i['boton_id'])))
+    boton.click()
 
     try:
+        time.sleep(2)
         WebDriverWait(driver, 60).until(
             EC.presence_of_all_elements_located((By.ID, "uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1"))
         )
+        table = driver.find_element(By.ID, 'uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1')
         print("> [Información de grupo cargada]\n")
     except Exception as e:
         print('Error cargando lista de grupo')
         driver.quit()
 
     print("> [Serializando información]\n")
-
-    # Espera que la tabla esté presente en el DOM
-    table = driver.find_element(By.ID, 'uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1')
-
-    # Crear una lista para almacenar los datos
-    data = []
-
-    # Encontrar todas las filas en el cuerpo de la tabla
-    #rows = table.find_elements(By.CSS_SELECTOR, 'tbody tr')
+    
+    grupo_lista_data = []
     rows = table.find_elements(By.XPATH, ".//tbody/tr")
 
-    # Iterar a través de cada fila y extraer los datos
     for row in rows:
-        # Extraer el texto de cada columna en la fila
         numero = row.find_element(By.XPATH, "./td[1]/span").text
         matricula = row.find_element(By.XPATH, "./td[2]/span").text
         nombre = row.find_element(By.XPATH, "./td[3]/span").text
-        correo = row.find_element(By.XPATH, "./td[4]/span").text
+        #correo = row.find_element(By.XPATH, ".td[4]/span").text
         
-        # Agregar los datos extraídos a la lista
-        data.append({
+        grupo_lista_data.append({
             'Numero': numero,
             'Matricula': matricula,
             'Nombre': nombre,
-            'Correo': correo
+            #'Correo': correo
         })
 
-    with open(f'{cursos_data[uea_selected]["name_text"]}_grupo.json', 'w', encoding='utf-8') as json_file:
-        json.dump(data, json_file, ensure_ascii=False, indent=4)
+    with open(f'{i["grupo"]}_{cursos_data[uea_selected]["name_text"]}_grupo.json', 'w', encoding='utf-8') as json_file:
+        json.dump(grupo_lista_data, json_file, ensure_ascii=False, indent=4)
     print("> [Datos guardados en formato JSON]\n")
-    # Cerrar el navegador
-    #driver.quit()
 
-    # Imprimir los datos extraídos
     print("> [INFORMACIÓN EXTRAÍDA DEL SISTEMA]\n")
-    print(json.dumps(data, indent=2))
-    driver.close()
+    print(json.dumps(grupo_lista_data, indent=2))
+    grupo_lista_data = []
+
+    # Clic para regresar
+    regresar_boton = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1"))
+    )
+    regresar_boton.click()
+
+    try:
+        time.sleep(2)
+        WebDriverWait(driver, 60).until(
+            EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012"))
+        )
+        print("> [Grupos obtenidos]\n")
+    except Exception as e:
+        print('Error cargando Módulos')
+        driver.quit()
+        
+
+
