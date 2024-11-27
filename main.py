@@ -54,7 +54,7 @@ username_input.send_keys(os.getenv('SIIA_USERNAME'))
 password_input.send_keys(os.getenv('SIIA_PASSWORD'))
 #input("Hey")
 driver.find_element(By.ID, "ufld:CD_INGRESAR.CONTROLES.ED01:AELCWBAWS003.1").click()
-
+# Comentario
 print("> [Enviando credenciales]\n")
 
 try:
@@ -80,7 +80,6 @@ except Exception as e:
 cursos_table = driver.find_element(By.ID, "uent:E_UEA.PE02:AELCWBAWT011")
 cursos_rows = cursos_table.find_elements(By.XPATH, ".//tr[@id]")
 cursos_data = []
-#print(cursos_rows)
 
 for row in cursos_rows:
     # Encuentra el elemento <a> dentro de la fila
