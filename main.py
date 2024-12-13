@@ -1,209 +1,492 @@
-import os, sys, json, requests, time
+import os
+import sys
+import time
+import openpyxl
+from dotenv import load_dotenv
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
-from dotenv import load_dotenv
-load_dotenv()
+class SIIAScraper:
+    def __init__(self, headless=False):
+        """
+        Initialize the SIIA Scraper
+        
+        :param headless: Boolean to run Chrome in headless mode
+        """
+        # Load environment variables
+        load_dotenv()
+
+        # Setup Chrome options
+        self.options = webdriver.ChromeOptions()
+        if headless:
+            self.options.add_argument("--headless")
+            self.options.add_argument("--no-sandbox")
+            self.options.add_argument("--disable-dev-shm-usage")
+
+        # Initialize driver
+        self.driver = webdriver.Chrome(options=self.options)
+        
+        # Set window size
+        screen_width = self.driver.execute_script("return window.screen.availWidth")
+        screen_height = self.driver.execute_script("return window.screen.availHeight")
+        self.driver.set_window_size(screen_width // 2, screen_height)
+
+    def login(self):
+        """
+        Log in to the SIIA system
+        """
+        print("> [Entrando a SIIA]\n")
+        url = os.getenv('SIIA_XOC_URI')
+        self.driver.get(url)
+        print("> [Login de SIIA cargado]\n")
+
+        # Find login fields
+        username_input = self.driver.find_element(By.ID, "ufld:CD_USUARIO.CONTROLES.ED01:AELCWBAWS003.1")
+        password_input = self.driver.find_element(By.ID, "ufld:CD_CONTRASENA.CONTROLES.ED01:AELCWBAWS003.1")
+
+        username_input.send_keys(os.getenv('SIIA_USERNAME'))
+        password_input.send_keys(os.getenv('SIIA_PASSWORD'))
+        self.driver.find_element(By.ID, "ufld:CD_INGRESAR.CONTROLES.ED01:AELCWBAWS003.1").click()
+
+        # Wait for successful login
+        try:
+            WebDriverWait(self.driver, 20).until(
+                EC.presence_of_all_elements_located((By.ID, "ufld:CD_SALIR.CONTROL.ED01:AELCWBAWT002.1")))
+            print("> [Acceso a SIIA exitoso!]\n")
+        except TimeoutException:
+            print('Error al acceder a SIIA')
+            self.driver.quit()
+            sys.exit(1)
+
+    def access_courses(self):
+        """
+        Access courses by coordination
+        
+        :return: List of available courses
+        """
+        print("> [Accediendo a CURSOS POR COORDINACIÓN]\n")
+        self.driver.find_element(By.ID, "ufld:OPCION_WEB_DOC_DE.OPCION_WEB_DOCENCIA.RH02:AELCWBAWT002.5").click()
+
+        try:
+            WebDriverWait(self.driver, 20).until(
+                EC.presence_of_all_elements_located((By.ID, "uent:E_UEA.PE02:AELCWBAWT011")))
+            print("> [Cursos obtenidos]\n")
+        except TimeoutException:
+            print('Error cargando "Cursos por coordinación"')
+            self.driver.quit()
+            sys.exit(1)
+
+        # Get courses
+        cursos_table = self.driver.find_element(By.ID, "uent:E_UEA.PE02:AELCWBAWT011")
+        cursos_rows = cursos_table.find_elements(By.XPATH, ".//tr[@id]")
+        
+        cursos_data = []
+        for row in cursos_rows:
+            link = row.find_element(By.XPATH, ".//a")
+            name = row.find_element(By.XPATH, ".//span[contains(@id, 'NOM_OF_UEA_NO')]")
+            
+            cursos_data.append({
+                "link": link,
+                "name_text": name.text
+            })
+
+        return cursos_data
+
+    def list_and_select_course(self, cursos_data):
+        """
+        List and allow selection of a specific course
+        
+        :param cursos_data: List of courses
+        :return: Selected course index
+        """
+        for curso in cursos_data:
+            print(f"> [{cursos_data.index(curso)}] - {curso['name_text']}")
+
+        while True:
+            try:
+                uea_selected = int(input("\nSeleccione UEA a extraer > "))
+                if 0 <= uea_selected < len(cursos_data):
+                    return uea_selected
+                else:
+                    print("Selección fuera de rango. Intente de nuevo.")
+            except ValueError:
+                print("Por favor, ingrese un número válido.")
+
+    def scrape_single_module(self, curso, selected_index):
+        """
+        Scrape a single module
+        
+        :param curso: Course data
+        :param selected_index: Index of the selected course
+        """
+        print(f"> [Accediendo a grupos para {curso['name_text']}]\n")
+        curso['link'].click()
+
+        try:
+            WebDriverWait(self.driver, 60).until(
+                EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012")))
+            print("> [Grupos obtenidos]\n")
+        except TimeoutException:
+            print('Error cargando Módulos')
+            self.driver.quit()
+            sys.exit(1)
+
+        # Prepare Excel workbook
+        wb = openpyxl.Workbook()
+        
+        # Get groups
+        grupos_table = self.driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
+        grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
+        
+        grupos_data = self._extract_grupos_data(grupos_rows)
+        
+        # Process each group
+        for i in grupos_data:
+            ws = self._scrape_group_data(i, wb)
+
+        # Remove default sheet and save
+        wb.remove(wb['Sheet'])
+        excel_filename = f'{curso["name_text"]}_grupos.xlsx'
+        wb.save(excel_filename)
+        print(f"> [Datos guardados en {excel_filename}]\n")
+
+    def scrape_all_modules(self, curso, selected_index):
+        """
+        Scrape all modules for a course
+        
+        :param curso: Course data
+        :param selected_index: Index of the selected course
+        """
+        print(f"> [Accediendo a grupos para {curso['name_text']}]\n")
+        curso['link'].click()
+
+        try:
+            WebDriverWait(self.driver, 60).until(
+                EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012")))
+            print("> [Todos los grupos obtenidos]\n")
+        except TimeoutException:
+            print('Error cargando Módulos')
+            self.driver.quit()
+            sys.exit(1)
+
+        # Prepare Excel workbook
+        wb = openpyxl.Workbook()
+        
+        # Get groups
+        grupos_table = self.driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
+        grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
+        
+        grupos_data = self._extract_grupos_data(grupos_rows)
+        
+        # Process all groups
+        for i in grupos_data:
+            self._scrape_group_data(i, wb)
+
+        # Remove default sheet and save
+        wb.remove(wb['Sheet'])
+        excel_filename = f'{curso["name_text"]}_todos_grupos.xlsx'
+        wb.save(excel_filename)
+        print(f"> [Datos de todos los grupos guardados en {excel_filename}]\n")
+
+    def _extract_grupos_data(self, grupos_rows):
+        """
+        Extract group data from rows
+        
+        :param grupos_rows: Selenium WebElements of group rows
+        :return: List of group data
+        """
+        grupos_data = []
+        for row in grupos_rows:
+            try:
+                # Remove nested tables
+                nested_tables = row.find_elements(By.XPATH, './/td/table')
+                for nested_table in nested_tables:
+                    self.driver.execute_script("arguments[0].remove();", nested_table)
+
+                grupo = row.find_element(By.XPATH, './/td[2]').text.strip()
+                boton = row.find_element(By.XPATH, './/td[10]/a')
+
+                grupos_data.append({
+                    'grupo': grupo,
+                    'boton_id': boton.get_attribute("id")
+                })
+            except Exception as e:
+                print(f"Error al procesar la fila: {e}")
+        
+        return grupos_data
+
+    def _scrape_group_data(self, grupo_info, wb):
+        """
+        Scrape data for a specific group
+        
+        :param grupo_info: Dictionary with group information
+        :param wb: Openpyxl workbook
+        :return: Worksheet with group data
+        """
+        print(f"> [Accediendo a grupo {grupo_info['grupo']}]\n")
+        
+        # Click group button
+        boton = self.driver.find_element(By.ID, grupo_info['boton_id'])
+        WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.ID, grupo_info['boton_id'])))
+        boton.click()
+
+        try:
+            time.sleep(2)
+            WebDriverWait(self.driver, 60).until(
+                EC.presence_of_all_elements_located((By.ID, "uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1"))
+            )
+            table = self.driver.find_element(By.ID, 'uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1')
+            print("> [Información de grupo cargada]\n")
+        except TimeoutException:
+            print('Error cargando lista de grupo')
+            self.driver.quit()
+            sys.exit(1)
+
+        # Create worksheet
+        ws = wb.create_sheet(title=f"Grupo {grupo_info['grupo']}")
+        ws.append(['Número', 'Matrícula', 'Nombre'])
+        
+        # Extract student data
+        rows = table.find_elements(By.XPATH, ".//tbody/tr")
+        for row in rows:
+            numero = row.find_element(By.XPATH, "./td[1]/span").text
+            matricula = row.find_element(By.XPATH, "./td[2]/span").text
+            nombre = row.find_element(By.XPATH, "./td[3]/span").text
+            
+            ws.append([numero, matricula, nombre])
+
+        # Return to groups page
+        regresar_boton = WebDriverWait(self.driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1"))
+        )
+        regresar_boton.click()
+
+        try:
+            time.sleep(2)
+            WebDriverWait(self.driver, 60).until(
+                EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012"))
+            )
+            print("> [Grupos obtenidos]\n")
+        except TimeoutException:
+            print('Error cargando Módulos')
+            self.driver.quit()
+            sys.exit(1)
+
+        return ws
 
 
-hello = """
+    def scrape_all_courses_and_groups(self):
+        """
+        Scrape all groups from all available courses
+        """
+        print("> [Preparando extracción de TODOS los cursos y grupos]\n")
+        
+        # Prepare Excel workbook for all courses
+        wb = openpyxl.Workbook()
+        
+        try:
+            # Login and access courses
+            self.login()
+            cursos_data = self.access_courses()
+            
+            # Create a workbook to track extraction progress
+            tracking_wb = openpyxl.Workbook()
+            tracking_sheet = tracking_wb.active
+            tracking_sheet.title = "Extraction Progress"
+            tracking_sheet.append(["Course", "Status", "Groups Extracted", "Notes"])
+            
+            # Process each course
+            for selected_index, curso in enumerate(cursos_data):
+                print(f"\n> [Procesando curso: {curso['name_text']}]\n")
+                
+                try:
+                    # Click on the course
+                    curso['link'].click()
+                    
+                    # Wait for groups to load
+                    try:
+                        WebDriverWait(self.driver, 60).until(
+                            EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012")))
+                        print(f"> [Grupos para {curso['name_text']} obtenidos]\n")
+                    except TimeoutException:
+                        print(f'Error cargando Módulos para {curso["name_text"]}')
+                        tracking_sheet.append([curso['name_text'], "Failed", "0", "Timeout loading groups"])
+                        # Go back to courses page
+                        self.driver.find_element(By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1").click()
+                        continue
+
+                    # Get groups
+                    grupos_table = self.driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
+                    grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
+                    
+                    grupos_data = self._extract_grupos_data(grupos_rows)
+                    
+                    # Create a sheet for this course
+                    course_sheet = wb.create_sheet(title=self._sanitize_sheet_name(curso['name_text']))
+                    course_sheet.append(['Curso', 'Grupo', 'Número', 'Matrícula', 'Nombre'])
+                    
+                    # Track group extraction
+                    groups_extracted = 0
+                    
+                    # Process each group
+                    for grupo_info in grupos_data:
+                        try:
+                            # Click group button
+                            boton = self.driver.find_element(By.ID, grupo_info['boton_id'])
+                            WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.ID, grupo_info['boton_id'])))
+                            boton.click()
+
+                            # Wait for group details
+                            try:
+                                time.sleep(2)
+                                WebDriverWait(self.driver, 60).until(
+                                    EC.presence_of_all_elements_located((By.ID, "uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1"))
+                                )
+                                table = self.driver.find_element(By.ID, 'uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1')
+                            except TimeoutException:
+                                print(f'Error cargando lista de grupo {grupo_info["grupo"]}')
+                                continue
+
+                            # Extract student data
+                            rows = table.find_elements(By.XPATH, ".//tbody/tr")
+                            for row in rows:
+                                numero = row.find_element(By.XPATH, "./td[1]/span").text
+                                matricula = row.find_element(By.XPATH, "./td[2]/span").text
+                                nombre = row.find_element(By.XPATH, "./td[3]/span").text
+                                
+                                course_sheet.append([
+                                    curso['name_text'], 
+                                    grupo_info['grupo'], 
+                                    numero, 
+                                    matricula, 
+                                    nombre
+                                ])
+                            
+                            groups_extracted += 1
+
+                            # Return to groups page
+                            regresar_boton = WebDriverWait(self.driver, 10).until(
+                                EC.element_to_be_clickable((By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1"))
+                            )
+                            regresar_boton.click()
+
+                            # Wait for groups page to reload
+                            try:
+                                time.sleep(2)
+                                WebDriverWait(self.driver, 60).until(
+                                    EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012"))
+                                )
+                            except TimeoutException:
+                                print('Error volviendo a la página de grupos')
+                                break
+
+                        except Exception as group_error:
+                            print(f"Error procesando grupo {grupo_info['grupo']}: {group_error}")
+                    
+                    # Log extraction progress
+                    tracking_sheet.append([
+                        curso['name_text'], 
+                        "Completed", 
+                        str(groups_extracted), 
+                        f"{groups_extracted} groups extracted successfully"
+                    ])
+
+                except Exception as course_error:
+                    print(f"Error procesando curso {curso['name_text']}: {course_error}")
+                    tracking_sheet.append([curso['name_text'], "Failed", "0", str(course_error)])
+                
+                # If not the last course, go back to courses list
+                if selected_index < len(cursos_data) - 1:
+                    # Go back to courses page
+                    self.driver.find_element(By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1").click()
+                    
+                    # Wait for courses to load
+                    try:
+                        WebDriverWait(self.driver, 60).until(
+                            EC.presence_of_all_elements_located((By.ID, "uent:E_UEA.PE02:AELCWBAWT011")))
+                    except TimeoutException:
+                        print('Error volviendo a la lista de cursos')
+                        break
+
+            # Remove the default sheet
+            wb.remove(wb['Sheet'])
+            
+            # Save workbooks
+            extraction_timestamp = time.strftime("%Y%m%d_%H%M%S")
+            grupos_filename = f'SIIA_Todos_Grupos_{extraction_timestamp}.xlsx'
+            tracking_filename = f'SIIA_Extraction_Progress_{extraction_timestamp}.xlsx'
+            
+            wb.save(grupos_filename)
+            tracking_wb.save(tracking_filename)
+            
+            print(f"\n> [Extracción completa. Datos guardados en {grupos_filename}]")
+            print(f"> [Registro de progreso guardado en {tracking_filename}]\n")
+
+        finally:
+            # Always close the browser
+            self.driver.quit()
+
+    def _sanitize_sheet_name(self, name):
+        """
+        Sanitize sheet name to be Excel-compatible
+        
+        :param name: Original sheet name
+        :return: Sanitized sheet name
+        """
+        # Replace invalid characters and truncate to 31 characters
+        invalid_chars = r'[\\/*?:[\]]'
+        sanitized = ''.join(char for char in name if char not in invalid_chars)
+        return sanitized[:31]
+
+    def run(self):
+        """
+        Main method to run the scraper
+        """
+        print("""
 >>>[ACADEMICA SIIA EXTRACTOR]
 Integración con SIIA - UAM.
 
 WebScraper para la extracción de datos del
-Sistema Integral de Inforemación Académica
+Sistema Integral de Información Académica
 de la UAM Xochimilco.
 
 Autor: Daniel Limón
 Email: dani@dlimon.net
-
-"""
-
-print(hello)
-
-# Headless Mode
-options = webdriver.ChromeOptions()
-# options.add_argument("--headless")
-# options.add_argument("--no-sandbox")
-# options.add_argument("--disable-dev-shm-usage")
-
-print("> [Iniciando navegador]")
-driver = webdriver.Chrome(options=options)
-
-# Obtener las dimensiones de la pantalla principal
-screen_width = driver.execute_script("return window.screen.availWidth")
-screen_height = driver.execute_script("return window.screen.availHeight")
-
-print("> [Navegador iniciado]\n")
-
-#driver.set_window_size(width = 500, height = 850)
-driver.set_window_size(screen_width // 2, screen_height)
-
-print("> [Entrando a SIIA]\n")
-url = os.getenv('SIIA_XOC_URI')
-driver.get(url)
-print("> [Login de SIIA cargado]\n")
-
-# Encontrar campos de login
-username_input = driver.find_element(By.ID, "ufld:CD_USUARIO.CONTROLES.ED01:AELCWBAWS003.1")
-password_input = driver.find_element(By.ID, "ufld:CD_CONTRASENA.CONTROLES.ED01:AELCWBAWS003.1")
-
-username_input.send_keys(os.getenv('SIIA_USERNAME'))
-password_input.send_keys(os.getenv('SIIA_PASSWORD'))
-#input("Hey")
-driver.find_element(By.ID, "ufld:CD_INGRESAR.CONTROLES.ED01:AELCWBAWS003.1").click()
-
-print("> [Enviando credenciales]\n")
-
-try:
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_all_elements_located((By.ID, "ufld:CD_SALIR.CONTROL.ED01:AELCWBAWT002.1")))
-    print("> [Acceso a SIIA exitoso!]\n")
-except Exception as e:
-    print('Error al acceder a SIIA')
-    driver.quit()
-
-print("> [Accediendo a CURSOS POR COORDINACIÓN]\n")
-
-driver.find_element(By.ID, "ufld:OPCION_WEB_DOC_DE.OPCION_WEB_DOCENCIA.RH02:AELCWBAWT002.5").click()
-
-try:
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_all_elements_located((By.ID, "uent:E_UEA.PE02:AELCWBAWT011")))
-    print("> [Cursos obtenidos]\n")
-except Exception as e:
-    print('Error cargando "Cursos por coordinación"')
-    driver.quit()
-
-cursos_table = driver.find_element(By.ID, "uent:E_UEA.PE02:AELCWBAWT011")
-cursos_rows = cursos_table.find_elements(By.XPATH, ".//tr[@id]")
-cursos_data = []
-#print(cursos_rows)
-
-for row in cursos_rows:
-    # Encuentra el elemento <a> dentro de la fila
-    link = row.find_element(By.XPATH, ".//a")
-    # Encuentra el nombre en la misma fila
-    name = row.find_element(By.XPATH, ".//span[contains(@id, 'NOM_OF_UEA_NO')]")
-    
-    # Guarda el link y el nombre en la lista
-    cursos_data.append({
-        "link": link,
-        "name_text": name.text
-    })
-
-    # html_content = row.get_attribute('outerHTML')
-    # print(html_content)  # Imprime el HTML de cada fila
-
-
-for curso in cursos_data:
-    print(f"> [{cursos_data.index(curso)}] - {curso['name_text']}")
-
-uea_selected = int(input("\nSeleccione UEA a extraer > "))
-if isinstance(uea_selected, int) and uea_selected < len(cursos_data):
-
-
-    # Mercado y competencia entre capitales
-    print(f"> [Accediendo a grupos para {cursos_data[uea_selected]['name_text']}]\n")
-    cursos_data[uea_selected]['link'].click()
-    try:
-        WebDriverWait(driver, 60).until(
-            EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012")))
-        print("> [Grupos obtenidos]\n")
-    except Exception as e:
-        print('Error cargando Módulos')
-        driver.quit()
-
-    grupos_table = driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
-
-    grupos_data = []
-    grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
-
-for row in grupos_rows:
-    try:
-        # Eliminación de tablas anidadas no deseadas
-        nested_tables = row.find_elements(By.XPATH, './/td/table')
-        for nested_table in nested_tables:
-            driver.execute_script("arguments[0].remove();", nested_table)
-
-        grupo = row.find_element(By.XPATH, './/td[2]').text.strip()
-        boton = row.find_element(By.XPATH, './/td[10]/a')
-
-        # Agregar el `id` del botón en lugar del `xpath`
-        grupos_data.append({
-            'grupo': grupo,
-            'boton_id': boton.get_attribute("id")
-        })
-    except Exception as e:
-        print(f"Error al procesar la fila: {e}")
-
-
-    ###
-# print(grupos_data)
-# input(".")
-# Iterar sobre `grupos_data` para hacer clic y extraer datos
-for i in grupos_data:
-    print(f"> [Accediendo a grupo {i['grupo']}]\n")
-    
-    # Localiza el botón por `id` antes de hacer clic
-    boton = driver.find_element(By.ID, i['boton_id'])
-    WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.ID, i['boton_id'])))
-    boton.click()
-
-    try:
-        time.sleep(2)
-        WebDriverWait(driver, 60).until(
-            EC.presence_of_all_elements_located((By.ID, "uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1"))
-        )
-        table = driver.find_element(By.ID, 'uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1')
-        print("> [Información de grupo cargada]\n")
-    except Exception as e:
-        print('Error cargando lista de grupo')
-        driver.quit()
-
-    print("> [Serializando información]\n")
-    
-    grupo_lista_data = []
-    rows = table.find_elements(By.XPATH, ".//tbody/tr")
-
-    for row in rows:
-        numero = row.find_element(By.XPATH, "./td[1]/span").text
-        matricula = row.find_element(By.XPATH, "./td[2]/span").text
-        nombre = row.find_element(By.XPATH, "./td[3]/span").text
-        #correo = row.find_element(By.XPATH, ".td[4]/span").text
+""")
         
-        grupo_lista_data.append({
-            'Numero': numero,
-            'Matricula': matricula,
-            'Nombre': nombre,
-            #'Correo': correo
-        })
+        # Prompt for extraction mode
+        print("Modos de extracción:")
+        print("1) Un curso específico")
+        print("2) Todos los cursos")
+        mode = input("Seleccione modo > ")
 
-    with open(f'{i["grupo"]}_{cursos_data[uea_selected]["name_text"]}_grupo.json', 'w', encoding='utf-8') as json_file:
-        json.dump(grupo_lista_data, json_file, ensure_ascii=False, indent=4)
-    print("> [Datos guardados en formato JSON]\n")
-
-    print("> [INFORMACIÓN EXTRAÍDA DEL SISTEMA]\n")
-    print(json.dumps(grupo_lista_data, indent=2))
-    grupo_lista_data = []
-
-    # Clic para regresar
-    regresar_boton = WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable((By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1"))
-    )
-    regresar_boton.click()
-
-    try:
-        time.sleep(2)
-        WebDriverWait(driver, 60).until(
-            EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012"))
-        )
-        print("> [Grupos obtenidos]\n")
-    except Exception as e:
-        print('Error cargando Módulos')
-        driver.quit()
+        if mode == '1':
+            # Original single course extraction logic
+            cursos_data = self.access_courses()
+            selected_index = self.list_and_select_course(cursos_data)
+            extraction_mode = input("\nSeleccione modo de extracción:\n1) Un módulo\n2) Todos los módulos\n> ")
+            
+            if extraction_mode == '1':
+                self.scrape_single_module(cursos_data[selected_index], selected_index)
+            elif extraction_mode == '2':
+                self.scrape_all_modules(cursos_data[selected_index], selected_index)
+            else:
+                print("Opción inválida.")
         
+        elif mode == '2':
+            # New full extraction method
+            self.scrape_all_courses_and_groups()
+        
+        else:
+            print("Opción inválida.")
 
+def main():
+    scraper = SIIAScraper()
+    scraper.run()
 
+if __name__ == "__main__":
+    main()
