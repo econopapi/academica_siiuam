@@ -62,7 +62,7 @@ class SIIAScraper:
             self.driver.quit()
             sys.exit(1)
 
-    def access_courses(self) -> list[dict]:
+    def access_courses(self):
         """
         Access courses by coordination
         
@@ -84,7 +84,7 @@ class SIIAScraper:
         cursos_table = self.driver.find_element(By.ID, "uent:E_UEA.PE02:AELCWBAWT011")
         cursos_rows = cursos_table.find_elements(By.XPATH, ".//tr[@id]")
         
-        cursos_data: list[dict] = []
+        cursos_data = []
         for row in cursos_rows:
             link = row.find_element(By.XPATH, ".//a")
             name = row.find_element(By.XPATH, ".//span[contains(@id, 'NOM_OF_UEA_NO')]")
@@ -103,24 +103,21 @@ class SIIAScraper:
         :param cursos_data: List of courses
         :return: Selected course index
         """
-        print(f"> [0] - EXTRAER TODO")
         for curso in cursos_data:
-            print(f"> [{cursos_data.index(curso)+1}] - {curso['name_text']}")
+            print(f"> [{cursos_data.index(curso)}] - {curso['name_text']}")
 
         while True:
             try:
-                option_selected = int(input("\nSeleccione una opción > "))
-                if 0 < option_selected < len(cursos_data):
-                    return option_selected-1
-                elif option_selected == 0:
-                    return option_selected
+                uea_selected = int(input("\nSeleccione UEA a extraer > "))
+                if 0 <= uea_selected < len(cursos_data):
+                    return uea_selected
                 else:
                     print("Selección fuera de rango. Intente de nuevo.")
             except ValueError:
                 print("Por favor, ingrese un número válido.")
 
 
-    def scrape_all_modules(self, curso):
+    def scrape_all_groups(self, curso):
         """
         Scrape all modules for a course
         
@@ -157,7 +154,6 @@ class SIIAScraper:
         excel_filename = f'{curso["name_text"]}_todos_grupos.xlsx'
         wb.save(excel_filename)
         print(f"> [Datos de todos los grupos guardados en {excel_filename}]\n")
-
 
     def _extract_grupos_data(self, grupos_rows):
         """
@@ -254,21 +250,13 @@ class SIIAScraper:
             self.login()
 
             # Get courses
-            cursos_data: list[dict] = self.access_courses()
+            cursos_data = self.access_courses()
 
             # Select course
             selected_index = self.list_and_select_course(cursos_data)
+            
+            self.scrape_all_groups(cursos_data[selected_index])
 
-            # Mode selection
-            if selected_index == 0:
-                # Scrape all courses
-                print(f"> [Iniciando extracción de todos los cursos disponibles]\n")
-                for i in range(len(cursos_data)):
-                    new_cursos_data = self.access_courses()
-                    print(new_cursos_data)
-                    self.scrape_all_modules(new_cursos_data[i])
-            else:  
-                self.scrape_all_modules(cursos_data[selected_index])
 
         finally:
             # Always close the browser

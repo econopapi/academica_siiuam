@@ -116,45 +116,8 @@ class SIIAScraper:
             except ValueError:
                 print("Por favor, ingrese un número válido.")
 
-    def scrape_single_module(self, curso, selected_index):
-        """
-        Scrape a single module
-        
-        :param curso: Course data
-        :param selected_index: Index of the selected course
-        """
-        print(f"> [Accediendo a grupos para {curso['name_text']}]\n")
-        curso['link'].click()
 
-        try:
-            WebDriverWait(self.driver, 60).until(
-                EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012")))
-            print("> [Grupos obtenidos]\n")
-        except TimeoutException:
-            print('Error cargando Módulos')
-            self.driver.quit()
-            sys.exit(1)
-
-        # Prepare Excel workbook
-        wb = openpyxl.Workbook()
-        
-        # Get groups
-        grupos_table = self.driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
-        grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
-        
-        grupos_data = self._extract_grupos_data(grupos_rows)
-        
-        # Process each group
-        for i in grupos_data:
-            ws = self._scrape_group_data(i, wb)
-
-        # Remove default sheet and save
-        wb.remove(wb['Sheet'])
-        excel_filename = f'{curso["name_text"]}_grupos.xlsx'
-        wb.save(excel_filename)
-        print(f"> [Datos guardados en {excel_filename}]\n")
-
-    def scrape_all_modules(self, curso, selected_index):
+    def scrape_all_groups(self, curso):
         """
         Scrape all modules for a course
         
@@ -278,175 +241,29 @@ class SIIAScraper:
 
         return ws
 
-
-    def scrape_all_courses_and_groups(self):
+    def run(self):
         """
-        Scrape all groups from all available courses
+        Main method to run the scraper
         """
-        print("> [Preparando extracción de TODOS los cursos y grupos]\n")
-        
-        # Prepare Excel workbook for all courses
-        wb = openpyxl.Workbook()
-        
         try:
-            # Login and access courses
+            # Login process
             self.login()
+
+            # Get courses
             cursos_data = self.access_courses()
+
+            # Select course
+            selected_index = self.list_and_select_course(cursos_data)
             
-            # Create a workbook to track extraction progress
-            tracking_wb = openpyxl.Workbook()
-            tracking_sheet = tracking_wb.active
-            tracking_sheet.title = "Extraction Progress"
-            tracking_sheet.append(["Course", "Status", "Groups Extracted", "Notes"])
-            
-            # Process each course
-            for selected_index, curso in enumerate(cursos_data):
-                print(f"\n> [Procesando curso: {curso['name_text']}]\n")
-                
-                try:
-                    # Click on the course
-                    curso['link'].click()
-                    
-                    # Wait for groups to load
-                    try:
-                        WebDriverWait(self.driver, 60).until(
-                            EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012")))
-                        print(f"> [Grupos para {curso['name_text']} obtenidos]\n")
-                    except TimeoutException:
-                        print(f'Error cargando Módulos para {curso["name_text"]}')
-                        tracking_sheet.append([curso['name_text'], "Failed", "0", "Timeout loading groups"])
-                        # Go back to courses page
-                        self.driver.find_element(By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1").click()
-                        continue
+            self.scrape_all_groups(cursos_data[selected_index])
 
-                    # Get groups
-                    grupos_table = self.driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
-                    grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
-                    
-                    grupos_data = self._extract_grupos_data(grupos_rows)
-                    
-                    # Create a sheet for this course
-                    course_sheet = wb.create_sheet(title=self._sanitize_sheet_name(curso['name_text']))
-                    course_sheet.append(['Curso', 'Grupo', 'Número', 'Matrícula', 'Nombre'])
-                    
-                    # Track group extraction
-                    groups_extracted = 0
-                    
-                    # Process each group
-                    for grupo_info in grupos_data:
-                        try:
-                            # Click group button
-                            boton = self.driver.find_element(By.ID, grupo_info['boton_id'])
-                            WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.ID, grupo_info['boton_id'])))
-                            boton.click()
-
-                            # Wait for group details
-                            try:
-                                time.sleep(2)
-                                WebDriverWait(self.driver, 60).until(
-                                    EC.presence_of_all_elements_located((By.ID, "uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1"))
-                                )
-                                table = self.driver.find_element(By.ID, 'uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1')
-                            except TimeoutException:
-                                print(f'Error cargando lista de grupo {grupo_info["grupo"]}')
-                                continue
-
-                            # Extract student data
-                            rows = table.find_elements(By.XPATH, ".//tbody/tr")
-                            for row in rows:
-                                numero = row.find_element(By.XPATH, "./td[1]/span").text
-                                matricula = row.find_element(By.XPATH, "./td[2]/span").text
-                                nombre = row.find_element(By.XPATH, "./td[3]/span").text
-                                
-                                course_sheet.append([
-                                    curso['name_text'], 
-                                    grupo_info['grupo'], 
-                                    numero, 
-                                    matricula, 
-                                    nombre
-                                ])
-                            
-                            groups_extracted += 1
-
-                            # Return to groups page
-                            regresar_boton = WebDriverWait(self.driver, 10).until(
-                                EC.element_to_be_clickable((By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1"))
-                            )
-                            regresar_boton.click()
-
-                            # Wait for groups page to reload
-                            try:
-                                time.sleep(2)
-                                WebDriverWait(self.driver, 60).until(
-                                    EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012"))
-                                )
-                            except TimeoutException:
-                                print('Error volviendo a la página de grupos')
-                                break
-
-                        except Exception as group_error:
-                            print(f"Error procesando grupo {grupo_info['grupo']}: {group_error}")
-                    
-                    # Log extraction progress
-                    tracking_sheet.append([
-                        curso['name_text'], 
-                        "Completed", 
-                        str(groups_extracted), 
-                        f"{groups_extracted} groups extracted successfully"
-                    ])
-
-                except Exception as course_error:
-                    print(f"Error procesando curso {curso['name_text']}: {course_error}")
-                    tracking_sheet.append([curso['name_text'], "Failed", "0", str(course_error)])
-                
-                # If not the last course, go back to courses list
-                if selected_index < len(cursos_data) - 1:
-                    # Go back to courses page
-                    self.driver.find_element(By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1").click()
-                    
-                    # Wait for courses to load
-                    try:
-                        WebDriverWait(self.driver, 60).until(
-                            EC.presence_of_all_elements_located((By.ID, "uent:E_UEA.PE02:AELCWBAWT011")))
-                    except TimeoutException:
-                        print('Error volviendo a la lista de cursos')
-                        break
-
-            # Remove the default sheet
-            wb.remove(wb['Sheet'])
-            
-            # Save workbooks
-            extraction_timestamp = time.strftime("%Y%m%d_%H%M%S")
-            grupos_filename = f'SIIA_Todos_Grupos_{extraction_timestamp}.xlsx'
-            tracking_filename = f'SIIA_Extraction_Progress_{extraction_timestamp}.xlsx'
-            
-            wb.save(grupos_filename)
-            tracking_wb.save(tracking_filename)
-            
-            print(f"\n> [Extracción completa. Datos guardados en {grupos_filename}]")
-            print(f"> [Registro de progreso guardado en {tracking_filename}]\n")
 
         finally:
             # Always close the browser
             self.driver.quit()
 
-    def _sanitize_sheet_name(self, name):
-        """
-        Sanitize sheet name to be Excel-compatible
-        
-        :param name: Original sheet name
-        :return: Sanitized sheet name
-        """
-        # Replace invalid characters and truncate to 31 characters
-        invalid_chars = r'[\\/*?:[\]]'
-        sanitized = ''.join(char for char in name if char not in invalid_chars)
-        return sanitized[:31]
-
-    def run(self):
-        """
-        Main method to run the scraper
-        """
-        print("""
+def main():
+    print("""
 >>>[ACADEMICA SIIA EXTRACTOR]
 Integración con SIIA - UAM.
 
@@ -457,34 +274,7 @@ de la UAM Xochimilco.
 Autor: Daniel Limón
 Email: dani@dlimon.net
 """)
-        
-        # Prompt for extraction mode
-        print("Modos de extracción:")
-        print("1) Un curso específico")
-        print("2) Todos los cursos")
-        mode = input("Seleccione modo > ")
-
-        if mode == '1':
-            # Original single course extraction logic
-            cursos_data = self.access_courses()
-            selected_index = self.list_and_select_course(cursos_data)
-            extraction_mode = input("\nSeleccione modo de extracción:\n1) Un módulo\n2) Todos los módulos\n> ")
-            
-            if extraction_mode == '1':
-                self.scrape_single_module(cursos_data[selected_index], selected_index)
-            elif extraction_mode == '2':
-                self.scrape_all_modules(cursos_data[selected_index], selected_index)
-            else:
-                print("Opción inválida.")
-        
-        elif mode == '2':
-            # New full extraction method
-            self.scrape_all_courses_and_groups()
-        
-        else:
-            print("Opción inválida.")
-
-def main():
+    
     scraper = SIIAScraper()
     scraper.run()
 
