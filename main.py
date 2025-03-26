@@ -116,13 +116,27 @@ class SIIAScraper:
             except ValueError:
                 print("Por favor, ingrese un número válido.")
 
+    def _create_course_directory(self, course_name):
+        """
+        Create a directory for the course if it doesn't exist
+        
+        :param course_name: Name of the course
+        :return: Path to the created directory
+        """
+        # Sanitize course name to create a valid directory name
+        sanitized_course_name = "".join(
+            [c for c in course_name if c.isalnum() or c in (' ', '_', '-')]
+        ).rstrip()
+        
+        course_dir = os.path.join(os.getcwd(), sanitized_course_name)
+        os.makedirs(course_dir, exist_ok=True)
+        return course_dir
 
     def scrape_all_groups(self, curso):
         """
-        Scrape all modules for a course
+        Scrape all groups for a course, saving each group to a separate Excel file
         
         :param curso: Course data
-        :param selected_index: Index of the selected course
         """
         print(f"> [Accediendo a grupos para {curso['name_text']}]\n")
         curso['link'].click()
@@ -136,9 +150,9 @@ class SIIAScraper:
             self.driver.quit()
             sys.exit(1)
 
-        # Prepare Excel workbook
-        wb = openpyxl.Workbook()
-        
+        # Create directory for course
+        course_dir = self._create_course_directory(curso['name_text'])
+
         # Get groups
         grupos_table = self.driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
         grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
@@ -146,14 +160,10 @@ class SIIAScraper:
         grupos_data = self._extract_grupos_data(grupos_rows)
         
         # Process all groups
-        for i in grupos_data:
-            self._scrape_group_data(i, wb)
+        for grupo_info in grupos_data:
+            self._scrape_group_data(grupo_info, course_dir)
 
-        # Remove default sheet and save
-        wb.remove(wb['Sheet'])
-        excel_filename = f'{curso["name_text"]}_todos_grupos.xlsx'
-        wb.save(excel_filename)
-        print(f"> [Datos de todos los grupos guardados en {excel_filename}]\n")
+        print(f"> [Datos de todos los grupos guardados en {course_dir}]\n")
 
     def _extract_grupos_data(self, grupos_rows):
         """
@@ -182,13 +192,13 @@ class SIIAScraper:
         
         return grupos_data
 
-    def _scrape_group_data(self, grupo_info, wb):
+    def _scrape_group_data(self, grupo_info, course_dir):
         """
-        Scrape data for a specific group
+        Scrape data for a specific group and save to an Excel file
         
         :param grupo_info: Dictionary with group information
-        :param wb: Openpyxl workbook
-        :return: Worksheet with group data
+        :param course_dir: Directory to save the group's Excel file
+        :return: Filename of the saved Excel file
         """
         print(f"> [Accediendo a grupo {grupo_info['grupo']}]\n")
         
@@ -209,9 +219,13 @@ class SIIAScraper:
             self.driver.quit()
             sys.exit(1)
 
-        # Create worksheet
-        ws = wb.create_sheet(title=f"Grupo {grupo_info['grupo']}")
-        ws.append(['Número', 'Matrícula', 'Nombre'])
+        # Create Excel workbook for this group
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = f"Grupo {grupo_info['grupo']}"
+        
+        # Add headers
+        ws.append(['numero_lista', 'matricula', 'nombre_alumno'])
         
         # Extract student data
         rows = table.find_elements(By.XPATH, ".//tbody/tr")
@@ -221,6 +235,11 @@ class SIIAScraper:
             nombre = row.find_element(By.XPATH, "./td[3]/span").text
             
             ws.append([numero, matricula, nombre])
+
+        # Save Excel file
+        excel_filename = os.path.join(course_dir, f"Grupo_{grupo_info['grupo']}.xlsx")
+        wb.save(excel_filename)
+        print(f"> [Datos del grupo {grupo_info['grupo']} guardados en {excel_filename}]\n")
 
         # Return to groups page
         regresar_boton = WebDriverWait(self.driver, 10).until(
@@ -239,7 +258,7 @@ class SIIAScraper:
             self.driver.quit()
             sys.exit(1)
 
-        return ws
+        return excel_filename
 
     def run(self):
         """
@@ -256,7 +275,6 @@ class SIIAScraper:
             selected_index = self.list_and_select_course(cursos_data)
             
             self.scrape_all_groups(cursos_data[selected_index])
-
 
         finally:
             # Always close the browser
