@@ -8,7 +8,7 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
 class SIIAScraper:
     def __init__(self, headless=False):
@@ -34,6 +34,7 @@ class SIIAScraper:
         screen_width = self.driver.execute_script("return window.screen.availWidth")
         screen_height = self.driver.execute_script("return window.screen.availHeight")
         self.driver.set_window_size(screen_width // 2, screen_height)
+        self.default_timeout = 40
 
     def login(self):
         """
@@ -54,7 +55,7 @@ class SIIAScraper:
 
         # Wait for successful login
         try:
-            WebDriverWait(self.driver, 20).until(
+            WebDriverWait(self.driver, self.default_timeout).until(
                 EC.presence_of_all_elements_located((By.ID, "ufld:CD_SALIR.CONTROL.ED01:AELCWBAWT002.1")))
             print("> [Acceso a SIIA exitoso!]\n")
         except TimeoutException:
@@ -72,7 +73,7 @@ class SIIAScraper:
         self.driver.find_element(By.ID, "ufld:OPCION_WEB_DOC_DE.OPCION_WEB_DOCENCIA.RH02:AELCWBAWT002.5").click()
 
         try:
-            WebDriverWait(self.driver, 20).until(
+            WebDriverWait(self.driver, self.default_timeout).until(
                 EC.presence_of_all_elements_located((By.ID, "uent:E_UEA.PE02:AELCWBAWT011")))
             print("> [Cursos obtenidos]\n")
         except TimeoutException:
@@ -91,6 +92,7 @@ class SIIAScraper:
             
             cursos_data.append({
                 "link": link,
+                "link_id": link.get_attribute("id"),
                 "name_text": name.text
             })
 
@@ -139,10 +141,61 @@ class SIIAScraper:
         :param curso: Course data
         """
         print(f"> [Accediendo a grupos para {curso['name_text']}]\n")
-        curso['link'].click()
+
+        # Re-fetch the course link right before clicking to avoid stale references.
+        # Prefer link_id (stable within page load), then fallback to a tolerant text lookup.
+        course_link_id = curso.get("link_id")
+        course_name = " ".join(curso["name_text"].split())
+        fallback_xpath = (
+            "//table[@id='uent:E_UEA.PE02:AELCWBAWT011']"
+            "//tr[@id]//a[.//span[contains(@id, 'NOM_OF_UEA_NO') and contains(normalize-space(), \"{}\")]]"
+        ).format(course_name)
+
+        clicked = False
+        for attempt in range(3):
+            try:
+                if course_link_id:
+                    locator = (By.ID, course_link_id)
+                else:
+                    locator = (By.XPATH, fallback_xpath)
+
+                course_link = WebDriverWait(
+                    self.driver,
+                    25,
+                    poll_frequency=0.5,
+                    ignored_exceptions=(StaleElementReferenceException,),
+                ).until(EC.element_to_be_clickable(locator))
+                course_link.click()
+                clicked = True
+                break
+            except (StaleElementReferenceException, TimeoutException):
+                # If ID lookup fails, retry with tolerant text search.
+                locator = (By.XPATH, fallback_xpath)
+                try:
+                    course_link = WebDriverWait(
+                        self.driver,
+                        25,
+                        poll_frequency=0.5,
+                        ignored_exceptions=(StaleElementReferenceException,),
+                    ).until(EC.element_to_be_clickable(locator))
+                    course_link.click()
+                    clicked = True
+                    break
+                except (StaleElementReferenceException, TimeoutException):
+                    pass
+
+                if attempt < 2:
+                    time.sleep(1)
+                else:
+                    raise
+
+        if not clicked:
+            print('Error localizando el enlace del curso')
+            self.driver.quit()
+            sys.exit(1)
 
         try:
-            WebDriverWait(self.driver, 60).until(
+            WebDriverWait(self.driver, 90).until(
                 EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012")))
             print("> [Todos los grupos obtenidos]\n")
         except TimeoutException:
@@ -154,45 +207,62 @@ class SIIAScraper:
         course_dir = self._create_course_directory(curso['name_text'])
 
         # Get groups
-        grupos_table = self.driver.find_element(By.ID, "uent:CURSOS.AE02:AELCWBAWT012")
-        grupos_rows = grupos_table.find_elements(By.XPATH, ".//tbody/tr")
+        grupos_data = self._extract_grupos_data()
         
-        grupos_data = self._extract_grupos_data(grupos_rows)
-        
+        total_grupos = len(grupos_data)
+        print(f"> [Total de grupos a procesar: {total_grupos}]\n")
+
         # Process all groups
-        for grupo_info in grupos_data:
-            self._scrape_group_data(grupo_info, course_dir)
+        for idx, grupo_info in enumerate(grupos_data, start=1):
+            self._scrape_group_data(grupo_info, course_dir, idx, total_grupos)
 
         print(f"> [Datos de todos los grupos guardados en {course_dir}]\n")
 
-    def _extract_grupos_data(self, grupos_rows):
+    def _extract_grupos_data(self):
         """
-        Extract group data from rows
-        
-        :param grupos_rows: Selenium WebElements of group rows
+        Extract group data from table rows using browser-side JS to avoid stale row references.
+
         :return: List of group data
         """
-        grupos_data = []
-        for row in grupos_rows:
+        table_id = "uent:CURSOS.AE02:AELCWBAWT012"
+        extractor_js = """
+            const table = document.getElementById(arguments[0]);
+            if (!table) return [];
+
+            const rows = Array.from(table.querySelectorAll('tbody tr'));
+            const data = [];
+
+            for (const row of rows) {
+                const cells = row.querySelectorAll('td');
+                const grupo = cells[1] ? cells[1].innerText.trim() : '';
+                const buttonAnchor = cells[9] ? cells[9].querySelector('a') : null;
+                const buttonId = buttonAnchor ? buttonAnchor.id : null;
+
+                if (grupo && buttonId) {
+                    data.push({ grupo: grupo, boton_id: buttonId });
+                }
+            }
+
+            return data;
+        """
+
+        for attempt in range(3):
             try:
-                # Remove nested tables
-                nested_tables = row.find_elements(By.XPATH, './/td/table')
-                for nested_table in nested_tables:
-                    self.driver.execute_script("arguments[0].remove();", nested_table)
+                grupos_data = self.driver.execute_script(extractor_js, table_id)
+                if grupos_data:
+                    return grupos_data
+                time.sleep(1)
+            except StaleElementReferenceException:
+                if attempt < 2:
+                    time.sleep(1)
+                else:
+                    raise
 
-                grupo = row.find_element(By.XPATH, './/td[2]').text.strip()
-                boton = row.find_element(By.XPATH, './/td[10]/a')
+        print("Error al extraer grupos: no se encontraron filas validas")
+        self.driver.quit()
+        sys.exit(1)
 
-                grupos_data.append({
-                    'grupo': grupo,
-                    'boton_id': boton.get_attribute("id")
-                })
-            except Exception as e:
-                print(f"Error al procesar la fila: {e}")
-        
-        return grupos_data
-
-    def _scrape_group_data(self, grupo_info, course_dir):
+    def _scrape_group_data(self, grupo_info, course_dir, idx=None, total=None):
         """
         Scrape data for a specific group and save to an Excel file
         
@@ -200,20 +270,42 @@ class SIIAScraper:
         :param course_dir: Directory to save the group's Excel file
         :return: Filename of the saved Excel file
         """
-        print(f"> [Accediendo a grupo {grupo_info['grupo']}]\n")
+        if idx is not None and total is not None:
+            print(f"> [{time.strftime('%H:%M:%S')}] [Grupo {idx}/{total}] Accediendo a grupo {grupo_info['grupo']}\n")
+        else:
+            print(f"> [Accediendo a grupo {grupo_info['grupo']}]\n")
         
-        # Click group button
-        boton = self.driver.find_element(By.ID, grupo_info['boton_id'])
-        WebDriverWait(self.driver, 10).until(EC.element_to_be_clickable((By.ID, grupo_info['boton_id'])))
-        boton.click()
+        # Click group button (re-find on each attempt to avoid stale references)
+        clicked = False
+        for attempt in range(3):
+            try:
+                boton = WebDriverWait(
+                    self.driver,
+                    20,
+                    poll_frequency=0.5,
+                    ignored_exceptions=(StaleElementReferenceException,),
+                ).until(EC.element_to_be_clickable((By.ID, grupo_info['boton_id'])))
+                boton.click()
+                clicked = True
+                break
+            except (StaleElementReferenceException, TimeoutException):
+                if attempt < 2:
+                    time.sleep(1)
+                else:
+                    raise
+
+        if not clicked:
+            print(f"Error al acceder al grupo {grupo_info['grupo']}")
+            self.driver.quit()
+            sys.exit(1)
 
         try:
             time.sleep(2)
-            WebDriverWait(self.driver, 60).until(
+            WebDriverWait(self.driver, 90).until(
                 EC.presence_of_all_elements_located((By.ID, "uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1"))
             )
             table = self.driver.find_element(By.ID, 'uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1')
-            print("> [Información de grupo cargada]\n")
+            print(f"> [{time.strftime('%H:%M:%S')}] [Información de grupo cargada]\n")
         except TimeoutException:
             print('Error cargando lista de grupo')
             self.driver.quit()
@@ -226,33 +318,85 @@ class SIIAScraper:
         
         # Add headers
         ws.append(['numero_lista', 'matricula', 'nombre_alumno'])
-        
-        # Extract student data
-        rows = table.find_elements(By.XPATH, ".//tbody/tr")
-        for row in rows:
-            numero = row.find_element(By.XPATH, "./td[1]/span").text
-            matricula = row.find_element(By.XPATH, "./td[2]/span").text
-            nombre = row.find_element(By.XPATH, "./td[3]/span").text
-            
+
+        # Extract student data with JS to avoid stale row references after DOM refreshes.
+        students_js = """
+            const table = document.getElementById(arguments[0]);
+            if (!table) return [];
+
+            return Array.from(table.querySelectorAll('tbody tr'))
+                .map((row) => {
+                    const cells = row.querySelectorAll('td');
+                    const numero = cells[0] ? cells[0].innerText.trim() : '';
+                    const matricula = cells[1] ? cells[1].innerText.trim() : '';
+                    const nombre = cells[2] ? cells[2].innerText.trim() : '';
+                    return [numero, matricula, nombre];
+                })
+                .filter((item) => item[1] !== '' || item[2] !== '');
+        """
+
+        students_data = None
+        for attempt in range(3):
+            try:
+                students_data = self.driver.execute_script(
+                    students_js,
+                    "uent:ALUMNO_V_ACAD.AE02:AELCWBAWT013.1",
+                )
+                if students_data is not None:
+                    break
+            except StaleElementReferenceException:
+                if attempt < 2:
+                    time.sleep(1)
+                else:
+                    raise
+
+        if students_data is None:
+            print(f"Error extrayendo alumnos del grupo {grupo_info['grupo']}")
+            self.driver.quit()
+            sys.exit(1)
+
+        for numero, matricula, nombre in students_data:
             ws.append([numero, matricula, nombre])
 
-        # Save Excel file
-        excel_filename = os.path.join(course_dir, f"Grupo_{grupo_info['grupo']}.xlsx")
+        # Save Excel file. Some courses repeat group labels, so include index to avoid overwrite.
+        if idx is not None:
+            base_name = f"Grupo_{idx:03d}_{grupo_info['grupo']}"
+        else:
+            base_name = f"Grupo_{grupo_info['grupo']}"
+
+        excel_filename = os.path.join(course_dir, f"{base_name}.xlsx")
+        if os.path.exists(excel_filename):
+            suffix = 2
+            while True:
+                candidate = os.path.join(course_dir, f"{base_name}__dup{suffix}.xlsx")
+                if not os.path.exists(candidate):
+                    excel_filename = candidate
+                    break
+                suffix += 1
+
         wb.save(excel_filename)
-        print(f"> [Datos del grupo {grupo_info['grupo']} guardados en {excel_filename}]\n")
+        if idx is not None and total is not None:
+            print(
+                f"> [{time.strftime('%H:%M:%S')}] [Grupo {idx}/{total}] Datos del grupo {grupo_info['grupo']} guardados en {excel_filename}\n"
+            )
+        else:
+            print(f"> [Datos del grupo {grupo_info['grupo']} guardados en {excel_filename}]\n")
 
         # Return to groups page
-        regresar_boton = WebDriverWait(self.driver, 10).until(
+        regresar_boton = WebDriverWait(self.driver, 20).until(
             EC.element_to_be_clickable((By.ID, "ufld:CD_REGRESAR.CONTROLES.ED01:AELCWBAWT012.1"))
         )
         regresar_boton.click()
 
         try:
             time.sleep(2)
-            WebDriverWait(self.driver, 60).until(
+            WebDriverWait(self.driver, 90).until(
                 EC.presence_of_all_elements_located((By.ID, "uent:CURSOS.AE02:AELCWBAWT012"))
             )
-            print("> [Grupos obtenidos]\n")
+            if idx is not None and total is not None:
+                print(f"> [{time.strftime('%H:%M:%S')}] [Grupo {idx}/{total}] Regreso a lista de grupos OK\n")
+            else:
+                print("> [Grupos obtenidos]\n")
         except TimeoutException:
             print('Error cargando Módulos')
             self.driver.quit()
