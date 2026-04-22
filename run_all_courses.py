@@ -92,6 +92,7 @@ def load_failed_indices(summary_path: str) -> List[int]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Ejecuta main.py de forma programatica para todas las UEA "
             "(de 0 hasta N-1) y guarda resultados en una carpeta raiz."
